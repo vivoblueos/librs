@@ -76,7 +76,7 @@ impl Syscall for Sys {
         // blueos is not valid for this syscall now
         Ok(())
     }
-    unsafe fn nanosleep(_rqtp: *const timespec, _rmtp: *mut timespec) -> Result<()> {
+    unsafe fn nanosleep(rqtp: *const timespec, rmtp: *mut timespec) -> Result<()> {
         if rqtp.is_null() {
             return Err(Errno(-1));
         }
