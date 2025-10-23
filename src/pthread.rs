@@ -28,7 +28,7 @@ use crate::{
 };
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use blueos_header::{
-    syscalls::NR::{CreateThread, ExitThread, GetTid, SchedYield},
+    syscalls::NR::{CreateThread, ExitThread, GetSchedParam, GetTid, SchedYield, SetSchedParam},
     thread::{ExitArgs, SpawnArgs, DEFAULT_STACK_SIZE, STACK_ALIGN},
 };
 use blueos_scal::bk_syscall;
@@ -165,14 +165,24 @@ pub extern "C" fn gettid() -> pthread_t {
 #[linkage = "weak"]
 #[no_mangle]
 pub extern "C" fn pthread_getschedparam(
-    _thread: pthread_t,
+    thread: pthread_t,
     policy: *mut c_int,
-    _param: *mut sched_param,
+    param: *mut sched_param,
 ) -> c_int {
     // TODO: Currently kernel only supports SCHED_RR.
+    if policy.is_null() || param.is_null() {
+        return EINVAL;
+    }
+
     unsafe {
         *policy = SCHED_RR;
+        let ret = bk_syscall!(GetSchedParam, thread as usize) as isize;
+        if ret < 0 {
+            return ret as c_int;
+        }
+        (*param).sched_priority = ret as c_int;
     }
+
     0
 }
 
@@ -181,10 +191,20 @@ pub extern "C" fn pthread_getschedparam(
 #[linkage = "weak"]
 #[no_mangle]
 pub unsafe extern "C" fn pthread_setschedparam(
-    _thread: pthread_t,
-    _policy: c_int,
-    _param: *const sched_param,
+    thread: pthread_t,
+    policy: c_int,
+    param: *const sched_param,
 ) -> c_int {
+    if param.is_null() {
+        return EINVAL;
+    }
+    // Only SCHED_RR is supported now. set policy is an non-op.
+    // Only set current thread's priority for now.
+    let prio = (*param).sched_priority as c_int;
+    let ret = bk_syscall!(SetSchedParam, thread as usize, prio) as isize;
+    if ret < 0 {
+        return ret as c_int;
+    }
     0
 }
 
