@@ -61,6 +61,7 @@ pub mod tls;
 pub mod types;
 pub mod unistd;
 
+#[no_mangle]
 pub extern "C" fn __librs_start_main() {
     crate::pthread::register_my_tcb();
     crate::stdio::init();
