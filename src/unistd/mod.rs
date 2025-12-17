@@ -25,6 +25,8 @@ use core::{ptr, slice};
 use libc::{c_char, c_int, c_void, gid_t, mode_t, off_t, pid_t, size_t, ssize_t, uid_t, EINVAL};
 pub mod io;
 pub mod sysconf;
+use blueos_header::syscalls::NR::GetTid;
+use blueos_scal::bk_syscall;
 pub use io::*;
 pub use sysconf::*;
 
@@ -260,11 +262,10 @@ pub extern "C" fn getgid() -> gid_t {
     0
 }
 
-/// NOTE: blueos only has process 0
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/getpid.html>.
-#[no_mangle]
 pub extern "C" fn getpid() -> pid_t {
-    0
+    // NOTE: pid_t not equal to pthread_t, but currently this line has no harmness
+    bk_syscall!(GetTid) as pid_t
 }
 
 /// NOTE: blueos only has process 0

@@ -30,7 +30,7 @@ use alloc::{
     vec::Vec,
 };
 use blueos_header::{
-    syscalls::NR::{CreateThread, ExitThread, GetTid, SchedYield},
+    syscalls::NR::{CreateThread, ExitThread, GetTid, SchedYield, Tkill},
     thread::{SpawnArgs, DEFAULT_STACK_SIZE, STACK_ALIGN},
 };
 use blueos_scal::bk_syscall;
@@ -43,7 +43,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicI8, AtomicUsize, Ordering},
 };
 use libc::{
-    clockid_t, pthread_attr_t, pthread_barrier_t, pthread_barrierattr_t, pthread_cond_t,
+    clockid_t, pid_t, pthread_attr_t, pthread_barrier_t, pthread_barrierattr_t, pthread_cond_t,
     pthread_condattr_t, pthread_key_t, pthread_mutex_t, pthread_mutexattr_t, pthread_rwlock_t,
     pthread_rwlockattr_t, pthread_spinlock_t, pthread_t, sched_param, timespec, EBUSY, EDEADLK,
     EINVAL, ESRCH,
@@ -167,8 +167,15 @@ pub extern "C" fn pthread_self() -> pthread_t {
 
 /// Same as `pthread_self`
 #[no_mangle]
-pub extern "C" fn gettid() -> pthread_t {
-    bk_syscall!(GetTid) as pthread_t
+pub extern "C" fn gettid() -> pid_t {
+    // NOTE: pid_t not equal to pthread_t, but currently this line has no harmness
+    bk_syscall!(GetTid) as pid_t
+}
+
+#[no_mangle]
+pub extern "C" fn pthread_kill(thread: pthread_t, sig: c_int) -> c_int {
+    // reuse tkill for correct semantic,
+    bk_syscall!(Tkill, thread as pid_t, sig) as c_int
 }
 
 #[linkage = "weak"]
