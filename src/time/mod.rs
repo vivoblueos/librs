@@ -16,31 +16,45 @@
 // https://github.com/redox-os/relibc/blob/master/LICENSE
 // standard MIT license
 
-use crate::{
-    errno::SysCallFailed,
-    syscall::{Sys, Syscall},
+use crate::errno::ERRNO;
+use blueos_header::syscalls::NR::{
+    ClockGetTime, ClockNanoSleep, ClockSetTime, TimerCreate, TimerDelete,
+    TimerGetOverrun, TimerGetTime, TimerSetTime,
 };
+use blueos_scal::bk_syscall;
 use core::{arch::asm, mem};
-use libc::{
-    c_double, c_int, c_long, c_uint, c_void, clock_t, clockid_t, time_t, timespec, CLOCK_REALTIME,
-};
+use libc::{c_double, c_int, c_long, c_uint, c_void, clock_t, clockid_t, time_t, timer_t, timespec, itimerspec, sigevent, EINVAL};
 
-pub const CLOCK_PROCESS_CPUTIME_ID: clockid_t = 2;
-pub const CLOCKS_PER_SEC: c_long = 1_000_000;
-#[allow(non_camel_case_types)]
-pub struct sigevent;
-#[allow(non_camel_case_types)]
-pub type timer_t = *mut c_void;
-#[allow(non_camel_case_types)]
-pub struct itimerspec {
-    pub it_interval: timespec,
-    pub it_value: timespec,
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+
+// assume ns resolution for all clocks, kernel will convert it
+const CLOCK_RESOLUTION_NS: c_long = 1;
+
+#[inline]
+const fn is_supported_clock(clock_id: clockid_t) -> bool {
+    matches!(
+        clock_id,
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID
+    )
 }
+
+// POSIX required REALTIME and MONOTONIC clocks, currently, we treat PROCESS_CPUTIME_ID and THREAD_CPUTIME_ID
+// same, it maybe affect clock_nanosleep behavior in some cases.
+pub const CLOCK_REALTIME: clockid_t = 0;
+pub const CLOCK_MONOTONIC: clockid_t = 1;
+pub const CLOCK_PROCESS_CPUTIME_ID: clockid_t = 2;
+pub const CLOCK_THREAD_CPUTIME_ID: clockid_t = 3;
+
+pub const CLOCKS_PER_SEC: c_long = 1_000_000;
+
 #[no_mangle]
 pub unsafe extern "C" fn clock_gettime(clock_id: clockid_t, tp: *mut timespec) -> c_int {
-    match Sys::clock_gettime(clock_id, tp) {
-        Ok(()) => 0,
-        Err(_) => -1,
+    let ret = bk_syscall!(ClockGetTime, clock_id, tp) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
     }
 }
 
@@ -51,7 +65,9 @@ pub unsafe extern "C" fn time(tloc: *mut time_t) -> time_t {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    Sys::clock_gettime(CLOCK_REALTIME, &mut ts as *mut timespec);
+    if clock_gettime(CLOCK_REALTIME, &mut ts as *mut timespec) != 0 {
+        return -1;
+    }
     if !tloc.is_null() {
         *tloc = ts.tv_sec
     };
@@ -61,15 +77,32 @@ pub unsafe extern "C" fn time(tloc: *mut time_t) -> time_t {
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/clock_getres.html>.
 #[no_mangle]
 pub unsafe extern "C" fn clock_getres(clock_id: clockid_t, tp: *mut timespec) -> c_int {
-    Sys::clock_getres(clock_id, tp).map(|()| 0).syscall_failed()
+    if !is_supported_clock(clock_id) {
+        ERRNO.set(EINVAL);
+        return -1;
+    }
+    if tp.is_null() {
+        return 0;
+    }
+    *tp = timespec {
+        tv_sec: 0,
+        tv_nsec: CLOCK_RESOLUTION_NS,
+    };
+    0
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/clock_getres.html>.
 #[no_mangle]
 pub unsafe extern "C" fn clock_settime(clock_id: clockid_t, tp: *const timespec) -> c_int {
-    Sys::clock_settime(clock_id, tp)
-        .map(|()| 0)
-        .syscall_failed()
+    // we havn't support wall clock source or rtc, now , it's an workaround, when user setting
+    // CLOCK_REALTIME, we get the real system time, then the realtime offset to monotonic time
+    let ret = bk_syscall!(ClockSetTime, clock_id, tp) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/clock_nanosleep.html>.
@@ -80,15 +113,25 @@ pub unsafe extern "C" fn clock_nanosleep(
     rqtp: *const timespec,
     rmtp: *mut timespec,
 ) -> c_int {
-    Sys::clock_nanosleep(clock_id, flags, rqtp, rmtp)
-        .map(|()| 0)
-        .syscall_failed()
+    let ret = bk_syscall!(ClockNanoSleep, clock_id, flags, rqtp, rmtp) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/nanosleep.html>.
 #[no_mangle]
 pub unsafe extern "C" fn nanosleep(rqtp: *const timespec, rmtp: *mut timespec) -> c_int {
-    Sys::nanosleep(rqtp, rmtp).map(|()| 0).syscall_failed()
+    let ret = bk_syscall!(ClockNanoSleep, CLOCK_MONOTONIC, 0, rqtp, rmtp) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/clock.html>.
@@ -145,42 +188,72 @@ pub extern "C" fn ssleep(sec: c_uint) -> c_int {
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/timer_create.html>.
-// #[no_mangle]
-pub extern "C" fn timer_create(
-    _clock_id: clockid_t,
-    _evp: *mut sigevent,
-    _timerid: *mut timer_t,
+#[no_mangle]
+pub unsafe extern "C" fn timer_create(
+    clock_id: clockid_t,
+    evp: *mut sigevent,
+    timerid: *mut timer_t,
 ) -> c_int {
-    unimplemented!();
+    let ret = bk_syscall!(TimerCreate, clock_id, evp, timerid) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/timer_delete.html>.
-// #[no_mangle]
-pub extern "C" fn timer_delete(_timerid: timer_t) -> c_int {
-    unimplemented!();
+#[no_mangle]
+pub unsafe extern "C" fn timer_delete(timerid: timer_t) -> c_int {
+    let ret = bk_syscall!(TimerDelete, timerid) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/timer_getoverrun.html>.
-// #[no_mangle]
-pub extern "C" fn timer_getoverrun(_timerid: timer_t) -> c_int {
-    unimplemented!();
+#[no_mangle]
+pub unsafe extern "C" fn timer_getoverrun(timerid: timer_t) -> c_int {
+    let ret = bk_syscall!(TimerGetOverrun, timerid) as isize;
+    if ret >= 0 {
+        ret as c_int
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
-/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/timer_getoverrun.html>.
-// #[no_mangle]
-pub extern "C" fn timer_gettime(_timerid: timer_t, _value: *mut itimerspec) -> c_int {
-    unimplemented!();
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/timer_gettime.html>.
+#[no_mangle]
+pub unsafe extern "C" fn timer_gettime(timerid: timer_t, value: *mut itimerspec) -> c_int {
+    let ret = bk_syscall!(TimerGetTime, timerid, value) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
-/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/timer_getoverrun.html>.
-// #[no_mangle]
-pub extern "C" fn timer_settime(
-    _timerid: timer_t,
-    _flags: c_int,
-    _value: *const itimerspec,
-    _ovalue: *mut itimerspec,
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/timer_settime.html>.
+#[no_mangle]
+pub unsafe extern "C" fn timer_settime(
+    timerid: timer_t,
+    flags: c_int,
+    value: *const itimerspec,
+    ovalue: *mut itimerspec,
 ) -> c_int {
-    unimplemented!();
+    let ret = bk_syscall!(TimerSetTime, timerid, flags, value, ovalue) as isize;
+    if ret >= 0 {
+        0
+    } else {
+        ERRNO.set((-ret) as c_int);
+        -1
+    }
 }
 
 /// not defined in POSIX, but used in some implementations
