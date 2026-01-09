@@ -224,10 +224,15 @@ pub extern "C" fn pthread_setconcurrency(_concurrency: c_int) -> c_int {
     0
 }
 
+// see https://pubs.opengroup.org/onlinepubs/9799919799/functions/pthread_setschedprio.html
+// reuse SetSchedParam syscall
 #[linkage = "weak"]
 #[no_mangle]
-pub extern "C" fn pthread_setschedprio(_thread: pthread_t, _prio: c_int) -> c_int {
-    // BlueKernel currently doesn't support setting thread priority.
+pub extern "C" fn pthread_setschedprio(thread: pthread_t, prio: c_int) -> c_int {
+    let ret = bk_syscall!(SetSchedParam, thread as usize, prio) as isize;
+    if ret < 0 {
+        return ret as c_int;
+    }
     0
 }
 
@@ -914,6 +919,7 @@ mod tests {
     use blueos_test_macro::test;
     use core::ptr;
 
+    const NORMAL_PRIORITY: c_int = 28;
     type WaitPair = (*const Waitval<()>, *const Waitval<()>);
 
     extern "C" fn block_child_entry(arg: *mut c_void) -> *mut c_void {
@@ -1013,7 +1019,9 @@ mod tests {
 
         ready.wait();
 
-        let desired = sched_param { sched_priority: 3 };
+        let desired = sched_param {
+            sched_priority: NORMAL_PRIORITY,
+        };
         let ret = unsafe { pthread_setschedparam(th, SCHED_RR, &desired) };
 
         let mut policy = 0;
@@ -1041,7 +1049,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "arm")] // FIXME: riscv64 test hangs here
     fn check_pthread_setschedparam_blocked_thread() {
         let notify = Waitval::new();
         let blocker = Waitval::new();
@@ -1060,7 +1067,9 @@ mod tests {
 
         notify.wait();
 
-        let desired = sched_param { sched_priority: 2 };
+        let desired = sched_param {
+            sched_priority: NORMAL_PRIORITY,
+        };
         unsafe { pthread_setschedparam(th, SCHED_RR, &desired) };
 
         let mut policy = 0;
