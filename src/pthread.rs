@@ -129,7 +129,9 @@ extern "C" fn posix_start_routine(arg: *mut c_void) {
 extern "C" fn posix_cleanup_routine(arg: *mut c_void) {
     assert_ne!(arg, core::ptr::null_mut());
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
-    let layout = Layout::from_size_align(routine.storage_size, STACK_ALIGN).unwrap();
+    let Ok(layout) = Layout::from_size_align(routine.storage_size, STACK_ALIGN) else {
+        return;
+    };
     unsafe { system_dealloc(routine.storage_start, layout) };
 }
 
@@ -347,9 +349,13 @@ pub extern "C" fn pthread_create(
     assert_eq!(stack_size % STACK_ALIGN, 0);
     // We'll put PosixRoutineInfo on the stack.
     let storage_size = stack_size + core::mem::size_of::<PosixRoutineInfo>();
-    let layout = Layout::from_size_align(storage_size, STACK_ALIGN).unwrap();
+    let Ok(layout) = Layout::from_size_align(storage_size, STACK_ALIGN) else {
+        return -1;
+    };
     let storage_start = unsafe { system_alloc(layout) };
-    assert_ne!(storage_start, core::ptr::null_mut());
+    if storage_start.is_null() {
+        return -1;
+    }
     let posix_routine_info_ptr = unsafe { storage_start.add(stack_size) as *mut c_void };
     assert_eq!(
         posix_routine_info_ptr.align_offset(core::mem::align_of::<PosixRoutineInfo>()),
