@@ -25,7 +25,7 @@ build_rust("librs") {
     "//external/vendor/spin-0.9.8:spin",
     "//kernel/header:blueos_header",
     "//kernel/scal:blueos_scal",
-    "//libc:libc",
+    "//libc",
   ]
   configs += [ "//build/boards/${board}:kernel_config" ]
 }
@@ -42,7 +42,7 @@ build_rust("librs_swi") {
     "//external/vendor/spin-0.9.8:spin",
     "//kernel/header:blueos_header",
     "//kernel/scal:blueos_scal_swi",
-    "//libc:libc",
+    "//libc",
   ]
 
   # librs_swi will be used in apps dynamically loaded.
@@ -63,9 +63,9 @@ build_rust("librs_unittest_image") {
     "//external/vendor/spin-0.9.8:spin",
     "//kernel/header:blueos_header",
     "//kernel/kernel:blueos",
-    "//kernel/rsrt:rsrt",
+    "//kernel/rsrt",
     "//kernel/scal:blueos_scal",
-    "//libc:libc",
+    "//libc",
   ]
   proc_macro_deps = [ "//kernel/test_harness:blueos_test_macro" ]
   rustflags = [ "--test" ]
