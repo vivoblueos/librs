@@ -31,7 +31,7 @@ use core::{
     fmt::Write,
     ptr, slice,
 };
-use libc::ERANGE;
+use libc::{locale_t, ERANGE};
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/memccpy.html>.
 #[linkage = "weak"]
@@ -67,6 +67,33 @@ pub unsafe extern "C" fn memchr(
         Some(index) => haystack[index..].as_ptr() as *mut c_void,
         None => ptr::null_mut(),
     }
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/memmem.html>.
+#[linkage = "weak"]
+#[no_mangle]
+pub unsafe extern "C" fn memmem(
+    haystack: *const c_void,
+    haystacklen: c_size_t,
+    needle: *const c_void,
+    needlelen: c_size_t,
+) -> *mut c_void {
+    if needlelen == 0 {
+        return haystack as *mut c_void;
+    }
+    if haystacklen < needlelen {
+        return ptr::null_mut();
+    }
+
+    let hay = slice::from_raw_parts(haystack as *const u8, haystacklen);
+    let nee = slice::from_raw_parts(needle as *const u8, needlelen);
+
+    for start in 0..=(haystacklen - needlelen) {
+        if &hay[start..start + needlelen] == nee {
+            return (haystack as *const u8).add(start) as *mut c_void;
+        }
+    }
+    ptr::null_mut()
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/memcpy.html>.
@@ -398,89 +425,175 @@ pub unsafe extern "C" fn strrchr(s: *const c_char, c: c_int) -> *mut c_char {
     }
     ptr::null_mut()
 }
-#[cfg(dedup)]
-mod dup {
-    use super::super::*;
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strncmp.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strncmp(s1: *const c_char, s2: *const c_char, n: c_size_t) -> c_int {
-        let s1 = slice::from_raw_parts(s1 as *const c_uchar, n);
-        let s2 = slice::from_raw_parts(s2 as *const c_uchar, n);
 
-        for (&a, &b) in s1.iter().zip(s2.iter()) {
-            let val = (a as c_int) - (b as c_int);
-            if a != b || a == 0 {
-                return val;
+#[inline]
+unsafe fn ascii_fold(ch: c_char) -> c_char {
+    if (ch as u8).is_ascii_uppercase() {
+        (ch as u8 + b'a' - b'A') as c_char
+    } else {
+        ch
+    }
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/strcasecmp.html>.
+#[no_mangle]
+pub unsafe extern "C" fn strcasecmp(s1: *const c_char, s2: *const c_char) -> c_int {
+    strncasecmp(s1, s2, usize::MAX)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strcasecmp_l(
+    s1: *const c_char,
+    s2: *const c_char,
+    _locale: locale_t,
+) -> c_int {
+    strcasecmp(s1, s2)
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/strncasecmp.html>.
+#[no_mangle]
+pub unsafe extern "C" fn strncasecmp(s1: *const c_char, s2: *const c_char, n: c_size_t) -> c_int {
+    for i in 0..n {
+        let a = ascii_fold(*s1.add(i));
+        let b = ascii_fold(*s2.add(i));
+        if a != b || a == 0 || b == 0 {
+            return a as c_int - b as c_int;
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strncasecmp_l(
+    s1: *const c_char,
+    s2: *const c_char,
+    n: c_size_t,
+    _locale: locale_t,
+) -> c_int {
+    strncasecmp(s1, s2, n)
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/stpcpy.html>.
+#[no_mangle]
+pub unsafe extern "C" fn stpcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char {
+    let mut i = 0;
+    loop {
+        let ch = *src.add(i);
+        *dst.add(i) = ch;
+        if ch == 0 {
+            return dst.add(i);
+        }
+        i += 1;
+    }
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/stpncpy.html>.
+#[no_mangle]
+pub unsafe extern "C" fn stpncpy(dst: *mut c_char, src: *const c_char, n: c_size_t) -> *mut c_char {
+    let mut i = 0;
+    while i < n {
+        let ch = *src.add(i);
+        *dst.add(i) = ch;
+        i += 1;
+        if ch == 0 {
+            while i < n {
+                *dst.add(i) = 0;
+                i += 1;
             }
+            return dst.add(i - (n - (i - 1)).min(1) - 1);
         }
-
-        0
     }
+    dst.add(n)
+}
 
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strcmp.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strcmp(s1: *const c_char, s2: *const c_char) -> c_int {
-        strncmp(s1, s2, usize::MAX)
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/strlcpy.html>.
+#[no_mangle]
+pub unsafe extern "C" fn strlcpy(dst: *mut c_char, src: *const c_char, size: c_size_t) -> c_size_t {
+    let src_len = strlen(src);
+    if size != 0 {
+        let copy_len = core::cmp::min(src_len, size - 1);
+        memcpy(dst as *mut c_void, src as *const c_void, copy_len);
+        *dst.add(copy_len) = 0;
     }
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strcoll.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strcoll(s1: *const c_char, s2: *const c_char) -> c_int {
-        strcmp(s1, s2)
-    }
+    src_len
+}
 
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strxfrm.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strxfrm(s1: *mut c_char, s2: *const c_char, n: c_size_t) -> c_size_t {
-        let len = strlen(s2);
-        if len < n {
-            strcpy(s1, s2);
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/strlcat.html>.
+#[no_mangle]
+pub unsafe extern "C" fn strlcat(dst: *mut c_char, src: *const c_char, size: c_size_t) -> c_size_t {
+    let dst_len = strnlen(dst, size);
+    let src_len = strlen(src);
+    if dst_len == size {
+        return size + src_len;
+    }
+    let remaining = size - dst_len;
+    let _ = strlcpy(dst.add(dst_len), src, remaining);
+    dst_len + src_len
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/strcoll.html>.
+#[no_mangle]
+pub unsafe extern "C" fn strcoll_l(
+    s1: *const c_char,
+    s2: *const c_char,
+    _locale: locale_t,
+) -> c_int {
+    strcmp(s1, s2)
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/strxfrm.html>.
+#[no_mangle]
+pub unsafe extern "C" fn strxfrm(s1: *mut c_char, s2: *const c_char, n: c_size_t) -> c_size_t {
+    let len = strlen(s2);
+    if n != 0 {
+        let copy_len = core::cmp::min(len, n - 1);
+        memcpy(s1 as *mut c_void, s2 as *const c_void, copy_len);
+        *s1.add(copy_len) = 0;
+    }
+    len
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strxfrm_l(
+    s1: *mut c_char,
+    s2: *const c_char,
+    n: c_size_t,
+    _locale: locale_t,
+) -> c_size_t {
+    strxfrm(s1, s2, n)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strcmp(s1: *const c_char, s2: *const c_char) -> c_int {
+    strncmp(s1, s2, usize::MAX)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strncmp(s1: *const c_char, s2: *const c_char, n: c_size_t) -> c_int {
+    for i in 0..n {
+        let a = *s1.add(i) as u8;
+        let b = *s2.add(i) as u8;
+        if a != b || a == 0 || b == 0 {
+            return a as c_int - b as c_int;
         }
-        len
     }
+    0
+}
 
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strcpy.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char {
-        let src_iter = unsafe { NullTerminated::new(src) };
-        let src_dest_iter = unsafe { SrcDstPtrIter::new(src_iter.chain(once(&0)), dst) };
-        for (src_item, dst_item) in src_dest_iter {
-            dst_item.write(*src_item);
-        }
+#[no_mangle]
+pub unsafe extern "C" fn strcoll(s1: *const c_char, s2: *const c_char) -> c_int {
+    strcmp(s1, s2)
+}
 
-        dst
-    }
+#[no_mangle]
+pub unsafe extern "C" fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char {
+    stpcpy(dst, src);
+    dst
+}
 
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strdup.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strdup(s1: *const c_char) -> *mut c_char {
-        strndup(s1, usize::MAX)
-    }
-
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strndup.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strndup(s1: *const c_char, size: c_size_t) -> *mut c_char {
-        let len = strnlen(s1, size);
-
-        // the "+ 1" is to account for the NUL byte
-        let buffer = malloc(len + 1) as *mut c_char;
-        if buffer.is_null() {
-            ERRNO.set(ENOMEM as c_int);
-        } else {
-            //memcpy(buffer, s1, len)
-            for i in 0..len {
-                *buffer.add(i) = *s1.add(i);
-            }
-            *buffer.add(len) = 0;
-        }
-
-        buffer
-    }
-
-    /// https://pubs.opengroup.org/onlinepubs/9799919799/functions/strnlen.html
-    #[no_mangle]
-    pub unsafe extern "C" fn strnlen(s: *const c_char, size: c_size_t) -> c_size_t {
-        unsafe { NullTerminated::new(s) }.take(size).count()
-    }
+#[no_mangle]
+pub unsafe extern "C" fn strnlen(s: *const c_char, size: c_size_t) -> c_size_t {
+    unsafe { NullTerminated::new(s) }.take(size).count()
 }
 
 #[cfg(test)]
@@ -488,6 +601,7 @@ mod tests {
     use super::*;
     use crate::println;
     use blueos_test_macro::test;
+    use core::ffi::{c_char, c_void};
 
     #[test]
     fn check_ffs() {
@@ -596,5 +710,51 @@ mod tests {
             memmove(ptr.add(1) as *mut c_void, ptr as *const c_void, 4);
         }
         assert_eq!(data, [1, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn check_memmem() {
+        let haystack = b"hello world\0";
+        let needle = b"world";
+        let p = unsafe {
+            memmem(
+                haystack.as_ptr() as *const c_void,
+                haystack.len() - 1,
+                needle.as_ptr() as *const c_void,
+                needle.len(),
+            )
+        };
+        assert_eq!(p, unsafe { haystack.as_ptr().add(6) } as *mut c_void);
+    }
+
+    #[test]
+    fn check_stpcpy() {
+        let src = b"blueos\0";
+        let mut dst = [0 as c_char; 16];
+        let end = unsafe { stpcpy(dst.as_mut_ptr(), src.as_ptr() as *const c_char) };
+        assert_eq!(unsafe { strlen(dst.as_ptr()) }, 6);
+        assert_eq!(end, unsafe { dst.as_mut_ptr().add(6) });
+        assert_eq!(&dst[..7], &[98, 108, 117, 101, 111, 115, 0]);
+    }
+
+    #[test]
+    fn check_strlcpy() {
+        let src = b"abcdef\0";
+        let mut dst = [0 as c_char; 4];
+        let copied = unsafe { strlcpy(dst.as_mut_ptr(), src.as_ptr() as *const c_char, dst.len()) };
+        assert_eq!(copied, 6);
+        assert_eq!(&dst, &[97, 98, 99, 0]);
+    }
+
+    #[test]
+    fn check_strncasecmp() {
+        let a = b"BlueOS\0";
+        let b = b"blueot\0";
+        let eq_prefix =
+            unsafe { strncasecmp(a.as_ptr() as *const c_char, b.as_ptr() as *const c_char, 5) };
+        let diff_full =
+            unsafe { strncasecmp(a.as_ptr() as *const c_char, b.as_ptr() as *const c_char, 6) };
+        assert_eq!(eq_prefix, 0);
+        assert!(diff_full != 0);
     }
 }
