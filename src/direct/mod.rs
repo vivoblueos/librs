@@ -26,7 +26,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, vec::Vec};
-use blueos_header::syscalls::NR::{Close, Lseek, Mount, Umount};
+use blueos_header::syscalls::NR::{Close, Fcntl, GetDents, Lseek, Mount, Umount};
 use blueos_scal::bk_syscall;
 use core::{ptr, slice};
 use libc::{c_char, c_int, c_long, c_ulong, c_void, off_t, EINVAL, EIO, ENOMEM, SEEK_SET};
@@ -134,6 +134,38 @@ pub extern "C" fn closedir(dir: Box<DIR>) -> c_int {
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/fdopendir.html>.
 #[no_mangle]
+pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut DIR {
+    let cloexec = bk_syscall!(Fcntl, fd, libc::F_GETFD, 0) as c_int;
+    if cloexec < 0 {
+        ERRNO.set(-cloexec);
+        return ptr::null_mut();
+    }
+
+    if (cloexec & libc::FD_CLOEXEC) == 0 {
+        let ret = bk_syscall!(
+            Fcntl,
+            fd,
+            libc::F_SETFD,
+            (cloexec | libc::FD_CLOEXEC) as usize
+        ) as c_int;
+        if ret < 0 {
+            ERRNO.set(-ret);
+            return ptr::null_mut();
+        }
+    }
+
+    let dir = Box::new(DIR {
+        file: File::new(fd),
+        name: ptr::null(),
+        buf: Vec::with_capacity(INITIAL_BUFSIZE),
+        buf_offset: 0,
+        opaque_offset: 0,
+    });
+    Box::into_raw(dir)
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/opendir.html>.
+#[no_mangle]
 pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
     let path = unsafe { CStr::from_ptr(path) };
 
@@ -145,6 +177,31 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
             core::ptr::null_mut()
         }
     }
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/dirfd.html>.
+#[no_mangle]
+pub unsafe extern "C" fn dirfd(dirp: *mut DIR) -> c_int {
+    if dirp.is_null() {
+        ERRNO.set(EINVAL);
+        return -1;
+    }
+    *(*dirp).file
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn posix_getdents(fd: c_int, buf: *mut c_void, nbyte: usize) -> isize {
+    if buf.is_null() {
+        ERRNO.set(EINVAL);
+        return -1;
+    }
+
+    let ret = bk_syscall!(GetDents, fd, buf, nbyte) as isize;
+    if ret < 0 {
+        ERRNO.set((-ret) as c_int);
+        return -1;
+    }
+    ret
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/readdir.html>.
@@ -187,7 +244,7 @@ pub unsafe extern "C" fn scandir(
     dirp: *const c_char,
     namelist: *mut *mut *mut libc::dirent,
     filter: Option<extern "C" fn(_: *const libc::dirent) -> c_int>,
-    _compare: Option<
+    compare: Option<
         extern "C" fn(_: *mut *const libc::dirent, _: *mut *const libc::dirent) -> c_int,
     >,
 ) -> c_int {
@@ -243,9 +300,30 @@ pub unsafe extern "C" fn scandir(
         }
 
         ERRNO.set(old_errno);
-        // todo: sort?
+        if let Some(compare) = compare {
+            let slice = unsafe { slice::from_raw_parts_mut(*namelist, len) };
+            slice.sort_by(|a, b| {
+                let mut a_ptr = *a as *const libc::dirent;
+                let mut b_ptr = *b as *const libc::dirent;
+                compare(&mut a_ptr, &mut b_ptr).cmp(&0)
+            });
+        }
         len as c_int
     }
+}
+
+/// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/alphasort.html>.
+#[no_mangle]
+pub unsafe extern "C" fn alphasort(
+    a: *mut *const libc::dirent,
+    b: *mut *const libc::dirent,
+) -> c_int {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    let a_name = (*(*a)).d_name.as_ptr() as *const c_char;
+    let b_name = (*(*b)).d_name.as_ptr() as *const c_char;
+    crate::string::strcoll(a_name, b_name)
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/seekdir.html>.

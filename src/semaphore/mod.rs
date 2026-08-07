@@ -16,8 +16,9 @@
 // https://github.com/redox-os/relibc/blob/master/LICENSE
 // standard MIT license
 
+use crate::errno::ERRNO;
 use core::ptr;
-use libc::{c_char, c_int, c_uint, sem_t};
+use libc::{c_char, c_int, c_uint, clockid_t, sem_t, timespec, CLOCK_MONOTONIC, EINVAL, ETIMEDOUT};
 
 pub type RsSemaphore = crate::sync::semaphore::Semaphore;
 
@@ -67,8 +68,12 @@ pub unsafe extern "C" fn sem_post(sem: *mut sem_t) -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn sem_trywait(sem: *mut sem_t) -> c_int {
-    get(sem).try_wait();
-    0
+    if get(sem).try_wait() == 0 {
+        ERRNO.set(libc::EAGAIN);
+        -1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -78,11 +83,108 @@ pub unsafe extern "C" fn sem_unlink(_name: *const c_char) -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn sem_wait(sem: *mut sem_t) -> c_int {
-    get(sem).wait(None);
+    if get(sem).wait(None) {
+        0
+    } else {
+        ERRNO.set(ETIMEDOUT);
+        -1
+    }
+}
 
-    0
+#[no_mangle]
+pub unsafe extern "C" fn sem_timedwait(sem: *mut sem_t, abs_timeout: *const timespec) -> c_int {
+    if abs_timeout.is_null() {
+        ERRNO.set(EINVAL);
+        return -1;
+    }
+
+    if get(sem).wait(Some(&*abs_timeout)) {
+        0
+    } else {
+        ERRNO.set(ETIMEDOUT);
+        -1
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sem_clockwait(
+    sem: *mut sem_t,
+    clock_id: clockid_t,
+    abs_timeout: *const timespec,
+) -> c_int {
+    if abs_timeout.is_null() {
+        ERRNO.set(EINVAL);
+        return -1;
+    }
+    if clock_id != CLOCK_MONOTONIC {
+        ERRNO.set(EINVAL);
+        return -1;
+    }
+
+    if get(sem).wait(Some(&*abs_timeout)) {
+        0
+    } else {
+        ERRNO.set(ETIMEDOUT);
+        -1
+    }
 }
 
 unsafe fn get<'any>(sem: *mut sem_t) -> &'any RsSemaphore {
     &*sem.cast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blueos_test_macro::test;
+    use core::mem::MaybeUninit;
+
+    #[test]
+    fn check_sem_timedwait() {
+        let mut sem = MaybeUninit::<RsSemaphore>::uninit();
+        unsafe {
+            assert_eq!(sem_init(sem.as_mut_ptr().cast::<sem_t>(), 0, 0), 0);
+            assert_eq!(
+                sem_timedwait(sem.as_mut_ptr().cast::<sem_t>(), ptr::null()),
+                -1
+            );
+            assert_eq!(ERRNO.get(), EINVAL);
+            assert_eq!(sem_destroy(sem.as_mut_ptr().cast::<sem_t>()), 0);
+        }
+    }
+
+    #[test]
+    fn check_sem_clockwait() {
+        let mut sem = MaybeUninit::<RsSemaphore>::uninit();
+        unsafe {
+            assert_eq!(sem_init(sem.as_mut_ptr().cast::<sem_t>(), 0, 0), 0);
+            let timeout = timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+
+            assert_eq!(
+                sem_clockwait(
+                    sem.as_mut_ptr().cast::<sem_t>(),
+                    CLOCK_MONOTONIC,
+                    ptr::null()
+                ),
+                -1
+            );
+            assert_eq!(ERRNO.get(), EINVAL);
+
+            assert_eq!(
+                sem_clockwait(sem.as_mut_ptr().cast::<sem_t>(), 0, &timeout),
+                -1
+            );
+            assert_eq!(ERRNO.get(), EINVAL);
+
+            assert_eq!(
+                sem_clockwait(sem.as_mut_ptr().cast::<sem_t>(), CLOCK_MONOTONIC, &timeout),
+                -1
+            );
+            assert_eq!(ERRNO.get(), ETIMEDOUT);
+            assert_eq!(sem_destroy(sem.as_mut_ptr().cast::<sem_t>()), 0);
+        }
+    }
 }

@@ -64,7 +64,7 @@ impl Semaphore {
         loop {
             let value = self.try_wait();
 
-            if value == 0 {
+            if value != 0 {
                 return true;
             }
 
