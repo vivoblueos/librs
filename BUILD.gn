@@ -16,6 +16,14 @@ import("//build/boards/${board}.gni")
 import("//build/templates/build_template.gni")
 import("//build/toolchain/blueos.gni")
 
+build_rust("librs_esp32_flash_shared") {
+  crate_type = "rlib"
+  crate_name = "librs_esp32_flash_shared"
+  sources = [ "src/esp32_flash/mod.rs" ]
+  cfgs = [ "librs_esp32_flash_shared" ]
+  configs += [ "//build/boards/${board}:kernel_config" ]
+}
+
 build_rust("librs") {
   crate_type = "rlib"
   crate_name = "librs"
@@ -27,6 +35,10 @@ build_rust("librs") {
     "//kernel/scal:blueos_scal",
     "//libc",
   ]
+  if (board == "seeed_xiao_esp32c3") {
+    deps += [ ":librs_esp32_flash_shared" ]
+    cfgs = [ "librs_esp32_flash" ]
+  }
   configs += [ "//build/boards/${board}:kernel_config" ]
 }
 

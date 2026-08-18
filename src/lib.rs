@@ -41,6 +41,10 @@ pub mod c_str;
 pub mod ctype;
 pub mod direct;
 pub mod errno;
+// FIXME: This module is currently limited to the ESP32-C3 platform and still
+// needs a maintainability upgrade in a future update.
+#[cfg(librs_esp32_flash)]
+pub mod esp32_flash;
 pub mod fcntl;
 pub mod io;
 pub mod iter;
