@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::errno::ERRNO;
 pub use blueos_header::syscalls::NR::{
     Accept, Bind, Connect, Getsockopt, Listen, Recv, Recvfrom, Recvmsg, Send, Sendmsg, Sendto,
     Setsockopt, Shutdown, Socket,
 };
 use blueos_scal::bk_syscall;
-use crate::errno::ERRNO;
 use core::ffi::{c_int, c_size_t, c_ssize_t, c_void};
 
 #[inline]
@@ -166,8 +166,9 @@ pub unsafe extern "C" fn sendto(
     dest_addr: *const libc::sockaddr,
     dest_len: libc::socklen_t,
 ) -> c_ssize_t {
-    syscall_result(bk_syscall!(Sendto, socket, message, length, flags, dest_addr, dest_len) as isize)
-        as c_ssize_t
+    syscall_result(
+        bk_syscall!(Sendto, socket, message, length, flags, dest_addr, dest_len) as isize,
+    ) as c_ssize_t
 }
 
 /// Receive message from socket
