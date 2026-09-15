@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // FIXME: We are using kernel's allocator currently. Formally, we should use mmap to implement malloc.
-use blueos_header::syscalls::NR::{AllocMem, FreeMem};
+use blueos_header::syscalls::NR::{AllocMem, FreeMem, ReallocMem, Write};
 use blueos_scal::bk_syscall;
 use libc::{c_int, c_void, size_t, ENOMEM};
 
@@ -47,4 +47,69 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
         return core::ptr::null_mut();
     }
     ptr
+}
+
+/// Resize an allocation, preserving its contents up to the smaller of the two
+/// sizes.
+///
+/// The kernel performs the resize: only it knows the old block's size, and
+/// reimplementing that here would mean either tracking sizes in `malloc` (which
+/// changes the pointer every existing caller sees) or copying a length the
+/// caller cannot supply.
+#[no_mangle]
+pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: size_t) -> *mut c_void {
+    let mut moved: *mut c_void = core::ptr::null_mut();
+    // A zero size is the C "free and return null" case, and the kernel handler
+    // reports it as failure; free here so the block is not leaked.
+    if size == 0 {
+        free(ptr);
+        return core::ptr::null_mut();
+    }
+    let rc = bk_syscall!(ReallocMem, &mut moved as *mut *mut c_void, ptr, size);
+    if rc != 0 {
+        return core::ptr::null_mut();
+    }
+    moved
+}
+
+/// Allocate `count * size` zeroed bytes. `malloc` plus an explicit clear: the
+/// kernel's `calloc` is not reachable from here and the zeroing is unambiguous
+/// at this level.
+#[no_mangle]
+pub unsafe extern "C" fn calloc(count: size_t, size: size_t) -> *mut c_void {
+    let Some(total) = count.checked_mul(size) else {
+        return core::ptr::null_mut();
+    };
+    let ptr = malloc(total);
+    if !ptr.is_null() {
+        core::ptr::write_bytes(ptr as *mut u8, 0, total);
+    }
+    ptr
+}
+
+/// `memalign` is `posix_memalign` with C's return convention instead of the
+/// error-code one.
+#[no_mangle]
+pub unsafe extern "C" fn memalign(alignment: size_t, size: size_t) -> *mut c_void {
+    let mut ptr: *mut c_void = core::ptr::null_mut();
+    if posix_memalign(&mut ptr as *mut *mut c_void, alignment, size) != 0 {
+        return core::ptr::null_mut();
+    }
+    ptr
+}
+
+/// Terminal landing pad for `-Cpanic=abort`.
+///
+/// Prints a marker before parking: the DSO has no unwinder, so the only way a
+/// failure here is diagnosable under QEMU is for it to say so on stderr before
+/// it stops responding.
+#[no_mangle]
+pub extern "C" fn abort() -> ! {
+    const MESSAGE: &[u8] = b"libc: abort()\n";
+    unsafe {
+        bk_syscall!(Write, 2, MESSAGE.as_ptr(), MESSAGE.len());
+    }
+    loop {
+        core::hint::spin_loop();
+    }
 }
