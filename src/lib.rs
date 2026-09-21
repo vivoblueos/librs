@@ -160,6 +160,11 @@ pub extern "C" fn __librs_start_main(
     // main-thread pthread-key/emutls destructors, then drop the TCB.
     crate::pthread::cleanup_my_tcb();
 
+    // `ApplicationFinishExit` retires this thread and never unwinds the
+    // startup frame. The TCB has released its context clone, so release the
+    // entry's last strong reference (and its owned auxv copy) explicitly.
+    drop(context);
+
     // finish the two-phase exit and retire. `finish_exit` never returns
     // (it performs `retire_me`), which subsumes the trailing `ExitThread`.
     let _ = bk_syscall!(ApplicationFinishExit);
