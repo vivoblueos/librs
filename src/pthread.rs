@@ -23,13 +23,12 @@ use crate::sync::{
     rwlock::{Pshared, Rwlock as RsRwLock, RwlockAttr},
     waitval::Waitval,
 };
-#[cfg(not(armv7m))]
-use alloc::alloc::dealloc as system_dealloc;
-#[cfg(armv7m)]
-use alloc::boxed::Box;
-use alloc::{alloc::alloc as system_alloc, collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
-#[cfg(armv7m)]
-use blueos_header::thread::STACK_FLAG_KERNEL_OWNED;
+use alloc::{
+    alloc::{alloc as system_alloc, dealloc as system_dealloc},
+    collections::btree_map::BTreeMap,
+    sync::Arc,
+    vec::Vec,
+};
 use blueos_header::{
     syscalls::NR::{CreateThread, ExitThread, GetSchedParam, GetTid, SchedYield, SetSchedParam},
     thread::{SpawnArgs, DEFAULT_STACK_SIZE, STACK_ALIGN},
@@ -122,29 +121,19 @@ fn remove_tcb(tid: pthread_t) {
 struct PosixRoutineInfo {
     pub entry: extern "C" fn(arg: *mut c_void) -> *mut c_void,
     pub arg: *mut c_void,
-    #[cfg(not(armv7m))]
     pub storage_start: *mut u8,
-    #[cfg(not(armv7m))]
     pub storage_size: usize,
 }
 
 extern "C" fn posix_start_routine(arg: *mut c_void) {
-    #[cfg(armv7m)]
-    let (entry, routine_arg) = {
-        // Dynamic pthread startup metadata is independent of the stack
-        // allocation. Reclaim it on the new thread before calling user code.
-        let routine = unsafe { Box::from_raw(arg.cast::<PosixRoutineInfo>()) };
-        (routine.entry, routine.arg)
-    };
-    #[cfg(not(armv7m))]
+    // The startup metadata sits in the stack tail and outlives this thread:
+    // `posix_cleanup_routine` reads it back once the scheduler has switched
+    // off this stack.
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
-    #[cfg(not(armv7m))]
-    let (entry, routine_arg) = (routine.entry, routine.arg);
-    let retval = entry(routine_arg);
+    let retval = (routine.entry)(routine.arg);
     pthread_exit(retval);
 }
 
-#[cfg(not(armv7m))]
 extern "C" fn posix_cleanup_routine(arg: *mut c_void) {
     assert_ne!(arg, core::ptr::null_mut());
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
@@ -433,29 +422,17 @@ pub extern "C" fn pthread_create(
         unsafe { (*(attr as *const InnerPthreadAttr)).stack_size }
     };
     assert_eq!(stack_size % STACK_ALIGN, 0);
-    // Dynamic threads transfer an exact-size stack allocation to the kernel;
-    // their startup metadata is a separate object reclaimed by the new
-    // thread. Other targets retain the existing stack-tail cleanup ABI.
-    #[cfg(armv7m)]
-    let storage_size = stack_size;
-    #[cfg(not(armv7m))]
+    // The startup metadata lives in the stack tail, so the whole allocation
+    // is reclaimed in one piece by `posix_cleanup_routine`.
     let storage_size = stack_size + core::mem::size_of::<PosixRoutineInfo>();
     let layout = Layout::from_size_align(storage_size, STACK_ALIGN).unwrap();
     let storage_start = unsafe { system_alloc(layout) };
     assert_ne!(storage_start, core::ptr::null_mut());
-    #[cfg(armv7m)]
-    let posix_routine_info_ptr = Box::into_raw(Box::new(PosixRoutineInfo {
-        entry: start_routine,
-        arg,
-    })) as *mut c_void;
-    #[cfg(not(armv7m))]
     let posix_routine_info_ptr = unsafe { storage_start.add(stack_size) as *mut c_void };
-    #[cfg(not(armv7m))]
     assert_eq!(
         posix_routine_info_ptr.align_offset(core::mem::align_of::<PosixRoutineInfo>()),
         0
     );
-    #[cfg(not(armv7m))]
     {
         let posix_routine_info = unsafe { &mut *posix_routine_info_ptr.cast::<PosixRoutineInfo>() };
         posix_routine_info.entry = start_routine;
@@ -467,32 +444,18 @@ pub extern "C" fn pthread_create(
         spawn_hook: Some(register_posix_tcb),
         entry: posix_start_routine,
         arg: posix_routine_info_ptr,
-        // The allocation is owned by the kernel Thread and released after
-        // switching off it. A userspace cleanup here would execute from the
-        // scheduler's exception context and cannot safely issue FreeMem.
-        #[cfg(armv7m)]
-        cleanup: None,
-        #[cfg(not(armv7m))]
+        // The caller keeps ownership of the stack. The kernel runs this
+        // cleanup only after the retired thread has switched off it, so the
+        // `FreeMem` syscall inside is issued from an ordinary thread context.
         cleanup: Some(posix_cleanup_routine),
         stack_start: storage_start,
         stack_size,
-        #[cfg(armv7m)]
-        stack_flags: STACK_FLAG_KERNEL_OWNED,
     };
     let tid = bk_syscall!(CreateThread, &mut spawn_args as *mut SpawnArgs) as pthread_t;
     if tid == !0 {
-        // With `STACK_FLAG_KERNEL_OWNED`, the kernel has already consumed the
-        // stack allocation even though thread creation failed.
-        #[cfg(not(armv7m))]
-        unsafe {
-            system_dealloc(storage_start, layout)
-        };
-        #[cfg(armv7m)]
-        unsafe {
-            drop(Box::from_raw(
-                posix_routine_info_ptr.cast::<PosixRoutineInfo>(),
-            ))
-        };
+        // Thread creation failed, so the kernel never took the stack: the
+        // allocation is still ours to reclaim.
+        unsafe { system_dealloc(storage_start, layout) };
         return -1;
     }
     unsafe { thread.write_volatile(tid) };
