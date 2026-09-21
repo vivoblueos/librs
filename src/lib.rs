@@ -105,10 +105,11 @@ pub extern "C" fn __librs_start_main_static() {
 /// Dynamic application entry exported by `libc.so.1`.
 ///
 /// `blueos_scrt1::_start` tail-calls this with the application's `main` and the
-/// pinned `ApplicationStartInfo *`. grows the body into the full
+/// pinned `ApplicationStartInfo *`. It runs the whole application sequence —
 /// validate → init plan → `ApplicationInitComplete` → `main(argc, argv, envp)`
-/// → `ApplicationBeginExit` → atexit/fini → `ApplicationFinishExit` +
-/// `ExitThread` sequence; it never returns.
+/// → `ApplicationBeginExit` → atexit/fini → `ApplicationFinishExit` — and never
+/// returns; the last step performs the retirement a trailing `ExitThread` would
+/// otherwise do.
 #[cfg(librs_dso)]
 #[no_mangle]
 pub extern "C" fn __librs_start_main(

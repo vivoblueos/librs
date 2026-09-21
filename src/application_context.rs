@@ -18,16 +18,13 @@
 //! dynamic entry from the pinned [`BlueOsApplicationStartInfo`] and installed on
 //! the main thread's TCB. It owns the state that must stay application-local
 //! rather than shared across two concurrently-running applications: the `auxv`
-//! table, the atexit list, and the exit-coordinator flag. The kernel's
+//! table and the atexit list. The kernel's
 //! start storage already pins the *bytes* behind `info` for the application
 //! lifetime; the context additionally owns its own copy of the auxv entries so a
 //! future larger `struct_size` (appended fields) can never dangle.
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{
-    slice,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::slice;
 
 use spin::RwLock;
 
@@ -42,9 +39,6 @@ pub type AtExitEntry = extern "C" fn();
 pub struct LibcApplicationContext {
     auxv: Box<[BlueOsAuxvEntry]>,
     atexit: RwLock<Vec<AtExitEntry>>,
-    /// Set when the exit sequence begins; guards against running the atexit and
-    /// fini plan twice.
-    exit_started: AtomicBool,
 }
 
 impl LibcApplicationContext {
@@ -72,7 +66,6 @@ impl LibcApplicationContext {
         Some(Arc::new(Self {
             auxv: auxv.into_boxed_slice(),
             atexit: RwLock::new(Vec::new()),
-            exit_started: AtomicBool::new(false),
         }))
     }
 
@@ -139,12 +132,6 @@ impl LibcApplicationContext {
         while let Some(function) = list.pop() {
             function();
         }
-    }
-
-    /// Mark the exit sequence started. Returns `false` if it already began, so a
-    /// double exit can be detected before destructors run twice.
-    pub fn begin_exit(&self) -> bool {
-        !self.exit_started.swap(true, Ordering::AcqRel)
     }
 }
 
