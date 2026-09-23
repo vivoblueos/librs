@@ -34,6 +34,9 @@ use blueos_header::{
     thread::{SpawnArgs, DEFAULT_STACK_SIZE, STACK_ALIGN},
 };
 use blueos_scal::bk_syscall;
+
+#[cfg(armv7m)]
+use crate::application_context::LibcApplicationContext;
 use core::{
     alloc::Layout,
     cell::SyncUnsafeCell,
@@ -89,6 +92,11 @@ struct PthreadTcb {
     cancel_enabled: AtomicBool,
     retval: SyncUnsafeCell<usize>,
     joint: Barrier,
+    // The owning application's runtime context. Inherited by
+    // every pthread created from this thread; `None` for threads that predate
+    // the dynamic entry (the static path has no application context).
+    #[cfg(armv7m)]
+    context: Option<Arc<LibcApplicationContext>>,
 }
 
 #[inline]
@@ -118,14 +126,14 @@ struct PosixRoutineInfo {
 }
 
 extern "C" fn posix_start_routine(arg: *mut c_void) {
+    // The startup metadata sits in the stack tail and outlives this thread:
+    // `posix_cleanup_routine` reads it back once the scheduler has switched
+    // off this stack.
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
     let retval = (routine.entry)(routine.arg);
     pthread_exit(retval);
 }
 
-// This routine will be executed on another stack by kernel.
-// The PosixRoutineInfo is stored between [storage_start, storage_start + storage_size),
-// that doesn't matter, after the `system_dealloc`, we don't use it anymore.
 extern "C" fn posix_cleanup_routine(arg: *mut c_void) {
     assert_ne!(arg, core::ptr::null_mut());
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
@@ -315,7 +323,74 @@ pub extern "C" fn register_my_posix_tcb() {
     register_posix_tcb(tid as usize, core::ptr::null_mut());
 }
 
+/// Register the calling thread's TCB and attach an application runtime context.
+/// Used by the dynamic entry to install the main thread's
+/// [`LibcApplicationContext`] before any constructor runs.
+/// cbindgen:ignore
+#[cfg(armv7m)]
+pub fn register_my_posix_tcb_with_context(context: Arc<LibcApplicationContext>) {
+    let tid = pthread_self();
+    register_posix_tcb_inner(tid as usize, Some(context));
+}
+
+/// The calling thread's application runtime context, if any.
+/// `None` for threads that predate the dynamic entry (the static path has no
+/// application context).
+#[inline]
+#[cfg(armv7m)]
+pub fn get_my_context() -> Option<Arc<LibcApplicationContext>> {
+    get_my_tcb().and_then(|tcb| tcb.context.clone())
+}
+
+/// Run the calling thread's pthread-key destructors (which includes the emutls
+/// key destructor) and remove its TCB, without the joinable/detached bookkeeping
+/// or the terminal `ExitThread`. Used by the dynamic entry's main-thread teardown
+///, which performs `ApplicationFinishExit` + `ExitThread` itself.
+/// cbindgen:ignore
+#[cfg(armv7m)]
+pub fn cleanup_my_tcb() {
+    let tid = pthread_self();
+    let Some(tcb) = get_tcb(tid) else {
+        return;
+    };
+    {
+        let read_tcb_kv = tcb.kv.read();
+        // Collect dtors and vals first: a dtor may write KEYS while we iterate.
+        let mut dtors = Vec::new();
+        let mut vals = Vec::new();
+        for (key, val) in read_tcb_kv.iter() {
+            let keys = KEYS.read();
+            if let Some(dtor) = keys.get(key) {
+                let ptr: *mut c_void = *val as *mut c_void;
+                if let Some(f) = dtor.0.as_ref() {
+                    dtors.push(*f);
+                    vals.push((*key, ptr));
+                }
+            }
+        }
+        drop(read_tcb_kv);
+        for i in 0..dtors.len() {
+            dtors[i](vals[i].1);
+        }
+    }
+    remove_tcb(tid);
+}
+
 extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
+    // Inherit the creating thread's application context. The
+    // `spawn_hook` runs synchronously in the creator's context (the kernel
+    // calls it inline inside `create_thread` before the new thread is queued),
+    // so `pthread_self()` still names the creator here.
+    #[cfg(armv7m)]
+    register_posix_tcb_inner(tid, get_my_context());
+    #[cfg(not(armv7m))]
+    register_posix_tcb_inner(tid);
+}
+
+fn register_posix_tcb_inner(
+    tid: usize,
+    #[cfg(armv7m)] context: Option<Arc<LibcApplicationContext>>,
+) {
     let tid: pthread_t = unsafe { core::mem::transmute(tid) };
     {
         let tcb = Arc::new(PthreadTcb {
@@ -324,6 +399,8 @@ extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
             detached: AtomicI8::new(0),
             retval: SyncUnsafeCell::new(0),
             joint: Barrier::new(unsafe { NonZero::new(2).unwrap_unchecked() }),
+            #[cfg(armv7m)]
+            context,
         });
         let mut write = TCBS.write();
         let ret = write.insert(tid, tcb);
@@ -345,7 +422,8 @@ pub extern "C" fn pthread_create(
         unsafe { (*(attr as *const InnerPthreadAttr)).stack_size }
     };
     assert_eq!(stack_size % STACK_ALIGN, 0);
-    // We'll put PosixRoutineInfo on the stack.
+    // The startup metadata lives in the stack tail, so the whole allocation
+    // is reclaimed in one piece by `posix_cleanup_routine`.
     let storage_size = stack_size + core::mem::size_of::<PosixRoutineInfo>();
     let layout = Layout::from_size_align(storage_size, STACK_ALIGN).unwrap();
     let storage_start = unsafe { system_alloc(layout) };
@@ -355,21 +433,28 @@ pub extern "C" fn pthread_create(
         posix_routine_info_ptr.align_offset(core::mem::align_of::<PosixRoutineInfo>()),
         0
     );
-    let posix_routine_info = unsafe { &mut *(posix_routine_info_ptr as *mut PosixRoutineInfo) };
-    posix_routine_info.entry = start_routine;
-    posix_routine_info.arg = arg;
-    posix_routine_info.storage_start = storage_start;
-    posix_routine_info.storage_size = storage_size;
+    {
+        let posix_routine_info = unsafe { &mut *posix_routine_info_ptr.cast::<PosixRoutineInfo>() };
+        posix_routine_info.entry = start_routine;
+        posix_routine_info.arg = arg;
+        posix_routine_info.storage_start = storage_start;
+        posix_routine_info.storage_size = storage_size;
+    }
     let mut spawn_args = SpawnArgs {
         spawn_hook: Some(register_posix_tcb),
         entry: posix_start_routine,
         arg: posix_routine_info_ptr,
+        // The caller keeps ownership of the stack. The kernel runs this
+        // cleanup only after the retired thread has switched off it, so the
+        // `FreeMem` syscall inside is issued from an ordinary thread context.
         cleanup: Some(posix_cleanup_routine),
         stack_start: storage_start,
         stack_size,
     };
     let tid = bk_syscall!(CreateThread, &mut spawn_args as *mut SpawnArgs) as pthread_t;
     if tid == !0 {
+        // Thread creation failed, so the kernel never took the stack: the
+        // allocation is still ours to reclaim.
         unsafe { system_dealloc(storage_start, layout) };
         return -1;
     }

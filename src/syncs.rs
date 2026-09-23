@@ -636,6 +636,9 @@ struct PosixRoutineInfo {
 }
 
 extern "C" fn posix_start_routine(arg: *mut c_void) {
+    // The startup metadata sits in the stack tail and outlives this thread:
+    // `posix_cleanup_routine` reads it back once the scheduler has switched
+    // off this stack.
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
     let retval = (routine.entry)(routine.arg);
     pthread_exit(retval);
@@ -747,6 +750,8 @@ pub extern "C" fn pthread_create(
         unsafe { (*(attr as *const InnerPthreadAttr)).stack_size }
     };
     assert_eq!(stack_size % STACK_ALIGN, 0);
+    // The startup metadata lives in the stack tail, so the whole allocation
+    // is reclaimed in one piece by `posix_cleanup_routine`.
     let storage_size = stack_size + core::mem::size_of::<PosixRoutineInfo>();
     let layout = Layout::from_size_align(storage_size, STACK_ALIGN).unwrap();
     let storage_start = unsafe { system_alloc(layout) };
@@ -756,21 +761,28 @@ pub extern "C" fn pthread_create(
         posix_routine_info_ptr.align_offset(core::mem::align_of::<PosixRoutineInfo>()),
         0
     );
-    let posix_routine_info = unsafe { &mut *(posix_routine_info_ptr as *mut PosixRoutineInfo) };
-    posix_routine_info.entry = start_routine;
-    posix_routine_info.arg = arg;
-    posix_routine_info.storage_start = storage_start;
-    posix_routine_info.storage_size = storage_size;
+    {
+        let posix_routine_info = unsafe { &mut *posix_routine_info_ptr.cast::<PosixRoutineInfo>() };
+        posix_routine_info.entry = start_routine;
+        posix_routine_info.arg = arg;
+        posix_routine_info.storage_start = storage_start;
+        posix_routine_info.storage_size = storage_size;
+    }
     let mut spawn_args = SpawnArgs {
         spawn_hook: Some(register_posix_tcb),
         entry: posix_start_routine,
         arg: posix_routine_info_ptr,
+        // The caller keeps ownership of the stack. The kernel runs this
+        // cleanup only after the retired thread has switched off it, so the
+        // `FreeMem` syscall inside is issued from an ordinary thread context.
         cleanup: Some(posix_cleanup_routine),
         stack_start: storage_start,
         stack_size,
     };
     let tid = bk_syscall!(CreateThread, &mut spawn_args as *mut SpawnArgs) as pthread_t;
     if tid == !0 {
+        // Thread creation failed, so the kernel never took the stack: the
+        // allocation is still ours to reclaim.
         unsafe { system_dealloc(storage_start, layout) };
         return -1;
     }
