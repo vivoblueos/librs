@@ -35,7 +35,13 @@ use blueos_header::{
 };
 use blueos_scal::bk_syscall;
 
-#[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))]
+#[cfg(any(
+    armv7m,
+    armv8m,
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
 use crate::application_context::LibcApplicationContext;
 use core::{
     alloc::Layout,
@@ -95,7 +101,13 @@ struct PthreadTcb {
     // The owning application's runtime context. Inherited by
     // every pthread created from this thread; `None` for threads that predate
     // the dynamic entry (the static path has no application context).
-    #[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))]
+    #[cfg(any(
+        armv7m,
+        armv8m,
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))]
     context: Option<Arc<LibcApplicationContext>>,
 }
 
@@ -327,7 +339,13 @@ pub extern "C" fn register_my_posix_tcb() {
 /// Used by the dynamic entry to install the main thread's
 /// [`LibcApplicationContext`] before any constructor runs.
 /// cbindgen:ignore
-#[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))]
+#[cfg(any(
+    armv7m,
+    armv8m,
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
 pub fn register_my_posix_tcb_with_context(context: Arc<LibcApplicationContext>) {
     let tid = pthread_self();
     register_posix_tcb_inner(tid as usize, Some(context));
@@ -337,7 +355,13 @@ pub fn register_my_posix_tcb_with_context(context: Arc<LibcApplicationContext>) 
 /// `None` for threads that predate the dynamic entry (the static path has no
 /// application context).
 #[inline]
-#[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))]
+#[cfg(any(
+    armv7m,
+    armv8m,
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
 pub fn get_my_context() -> Option<Arc<LibcApplicationContext>> {
     get_my_tcb().and_then(|tcb| tcb.context.clone())
 }
@@ -347,7 +371,13 @@ pub fn get_my_context() -> Option<Arc<LibcApplicationContext>> {
 /// or the terminal `ExitThread`. Used by the dynamic entry's main-thread teardown
 ///, which performs `ApplicationFinishExit` + `ExitThread` itself.
 /// cbindgen:ignore
-#[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))]
+#[cfg(any(
+    armv7m,
+    armv8m,
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
 pub fn cleanup_my_tcb() {
     let tid = pthread_self();
     let Some(tcb) = get_tcb(tid) else {
@@ -381,17 +411,34 @@ extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
     // `spawn_hook` runs synchronously in the creator's context (the kernel
     // calls it inline inside `create_thread` before the new thread is queued),
     // so `pthread_self()` still names the creator here.
-    #[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))]
+    #[cfg(any(
+        armv7m,
+        armv8m,
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))]
     register_posix_tcb_inner(tid, get_my_context());
-    #[cfg(not(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64")))]
+    #[cfg(not(any(
+        armv7m,
+        armv8m,
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    )))]
     register_posix_tcb_inner(tid);
 }
 
 fn register_posix_tcb_inner(
     tid: usize,
-    #[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))] context: Option<
-        Arc<LibcApplicationContext>,
-    >,
+    #[cfg(any(
+        armv7m,
+        armv8m,
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))]
+    context: Option<Arc<LibcApplicationContext>>,
 ) {
     let tid: pthread_t = unsafe { core::mem::transmute(tid) };
     {
@@ -401,7 +448,13 @@ fn register_posix_tcb_inner(
             detached: AtomicI8::new(0),
             retval: SyncUnsafeCell::new(0),
             joint: Barrier::new(unsafe { NonZero::new(2).unwrap_unchecked() }),
-            #[cfg(any(armv7m, armv8m, target_arch = "riscv32", target_arch = "riscv64"))]
+            #[cfg(any(
+                armv7m,
+                armv8m,
+                target_arch = "riscv32",
+                target_arch = "riscv64",
+                target_arch = "aarch64"
+            ))]
             context,
         });
         let mut write = TCBS.write();
