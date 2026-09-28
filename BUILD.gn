@@ -63,6 +63,19 @@ run_clippy("librs_swi_clippy") {
 }
 
 if (defined(dynamic_loader) && dynamic_loader) {
+  if (defined(dynamic_atomic)) {
+    # RV32IMC has no hardware atomics. Reuse the kernel's IRQ-protected
+    # helpers, with a PIC machine-mode IRQ adapter for the flat application ABI.
+    static_library("dynamic_atomic") {
+      sources = [
+        "//kernel/kernel/src/sync/libatomic/atomic.c",
+        "start/riscv/atomic_irq.S",
+      ]
+      configs += [ "//build/boards/${board}:dynamic_config" ]
+      cflags = [ "-fPIC" ]
+    }
+  }
+
   blueos_dso("libc") {
     crate_name = "librs"
     soname = "libc.so.1"
@@ -77,7 +90,11 @@ if (defined(dynamic_loader) && dynamic_loader) {
   }
 
   static_library("blueos_scrt1") {
-    sources = [ "start/arm/blueos_scrt1.S" ]
+    if (rust_abi_target == "riscv32") {
+      sources = [ "start/riscv/blueos_scrt1.S" ]
+    } else {
+      sources = [ "start/arm/blueos_scrt1.S" ]
+    }
     configs += [ "//build/boards/${board}:kernel_config" ]
   }
 }
