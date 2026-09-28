@@ -17,6 +17,13 @@ import("//build/templates/blueos_dso.gni")
 import("//build/templates/build_template.gni")
 import("//build/toolchain/blueos.gni")
 
+_thumb_cfgs = []
+if (rust_abi_target == "thumbv7m-none-eabi") {
+  _thumb_cfgs = [ "armv7m" ]
+} else if (rust_abi_target == "thumbv8m.main-none-eabihf") {
+  _thumb_cfgs = [ "armv8m" ]
+}
+
 build_rust("librs") {
   crate_type = "rlib"
   crate_name = "librs"
@@ -48,24 +55,19 @@ build_rust("librs_swi") {
 
   # librs_swi will be used in apps dynamically loaded.
   configs += [ "//build/boards/${board}:app_config" ]
-  if (board == "qemu_mps2_an385") {
-    cfgs = [ "armv7m" ]
-  }
+  cfgs = _thumb_cfgs
 }
 
 run_clippy("librs_swi_clippy") {
   deps = [ ":librs_swi" ]
 }
 
-if (board == "qemu_mps2_an385") {
+if (defined(dynamic_loader) && dynamic_loader) {
   blueos_dso("libc") {
     crate_name = "librs"
     soname = "libc.so.1"
     sources = [ "src/lib.rs" ]
-    cfgs = [
-      "armv7m",
-      "librs_dso",
-    ]
+    cfgs = _thumb_cfgs + [ "librs_dso" ]
     deps = [
       "//external/vendor/spin-0.9.8:spin",
       "//kernel/header:blueos_header",
@@ -97,9 +99,7 @@ build_rust("librs_unittest_image") {
   linker_script = default_linker_script
   proc_macro_deps = [ "//kernel/test_harness:blueos_test_macro" ]
   rustflags = [ "--test" ]
-  if (board == "qemu_mps2_an385") {
-    cfgs = [ "armv7m" ]
-  }
+  cfgs = _thumb_cfgs
 }
 
 run_clippy("librs_unittest_image_clippy") {

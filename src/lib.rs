@@ -48,7 +48,7 @@ use blueos_scal::bk_syscall;
 use core::ffi::{c_char, c_int};
 
 // We don't expose any interfaces or types externally, rust-lang/libc is doing that.
-#[cfg(armv7m)]
+#[cfg(any(armv7m, armv8m))]
 pub mod application_context;
 pub mod c_str;
 pub mod ctype;
