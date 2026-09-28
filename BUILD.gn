@@ -90,7 +90,7 @@ if (defined(dynamic_loader) && dynamic_loader) {
   }
 
   static_library("blueos_scrt1") {
-    if (rust_abi_target == "riscv32") {
+    if (rust_abi_target == "riscv32" || rust_abi_target == "riscv64") {
       sources = [ "start/riscv/blueos_scrt1.S" ]
     } else {
       sources = [ "start/arm/blueos_scrt1.S" ]
