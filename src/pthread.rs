@@ -379,31 +379,41 @@ pub fn get_my_context() -> Option<Arc<LibcApplicationContext>> {
     target_arch = "aarch64"
 ))]
 pub fn cleanup_my_tcb() {
+    run_my_key_destructors();
+    remove_tcb(pthread_self());
+}
+
+/// Flush callbacks while runtime DSOs are still mapped, retaining the TCB so
+/// their finalizers can make ordinary libc calls and create fresh TLS.
+#[cfg(any(
+    armv7m,
+    armv8m,
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
+pub(crate) fn run_my_key_destructors() {
     let tid = pthread_self();
     let Some(tcb) = get_tcb(tid) else {
         return;
     };
-    {
-        let read_tcb_kv = tcb.kv.read();
-        // Collect dtors and vals first: a dtor may write KEYS while we iterate.
-        let mut dtors = Vec::new();
-        let mut vals = Vec::new();
-        for (key, val) in read_tcb_kv.iter() {
-            let keys = KEYS.read();
-            if let Some(dtor) = keys.get(key) {
-                let ptr: *mut c_void = *val as *mut c_void;
-                if let Some(f) = dtor.0.as_ref() {
-                    dtors.push(*f);
-                    vals.push((*key, ptr));
-                }
+    for _ in 0..4 {
+        // Clear values before callbacks and hold neither the TCB nor key-table
+        // lock across them. A destructor may repopulate a key for another pass.
+        let values = core::mem::take(&mut *tcb.kv.write());
+        if values.is_empty() {
+            break;
+        }
+        for (key, value) in values {
+            if value == 0 {
+                continue;
+            }
+            let destructor = KEYS.read().get(&key).and_then(|dtor| dtor.0);
+            if let Some(destructor) = destructor {
+                destructor(value as *mut c_void);
             }
         }
-        drop(read_tcb_kv);
-        for i in 0..dtors.len() {
-            dtors[i](vals[i].1);
-        }
     }
-    remove_tcb(tid);
 }
 
 extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {

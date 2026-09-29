@@ -59,6 +59,7 @@ pub mod application_context;
 pub mod c_str;
 pub mod ctype;
 pub mod direct;
+pub mod dlfcn;
 #[cfg(librs_dso)]
 mod dso_rt;
 pub mod errno;
@@ -162,6 +163,15 @@ pub extern "C" fn __librs_start_main(
 
     // fini plan is already stored reverse-order; walk storage order.
     run_plan(&info.fini_plan);
+
+    // Pthread keys may point into runtime DSOs. Flush them before unmapping
+    // those images, while keeping the TCB available to their finalizers.
+    crate::pthread::run_my_key_destructors();
+
+    // Startup destructors and atexit may still use runtime libraries. Close
+    // outstanding handles only after those callbacks, while the application
+    // TCB is still available to runtime library destructors.
+    crate::dlfcn::close_at_exit();
 
     // main-thread pthread-key/emutls destructors, then drop the TCB.
     crate::pthread::cleanup_my_tcb();
