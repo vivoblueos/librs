@@ -1066,12 +1066,17 @@ mod tests {
         ptr::null_mut()
     }
 
-    type ReadyPair = (*const Waitval<()>, *const AtomicBool);
+    type ReadyPair = (*const Waitval<()>, *const AtomicBool, *const Waitval<c_int>);
 
     extern "C" fn ready_child_entry(arg: *mut c_void) -> *mut c_void {
         let pair = unsafe { &*(arg as *const ReadyPair) };
         let ready = unsafe { &*pair.0 };
         let release = unsafe { &*pair.1 };
+        let observed_after_unlock = unsafe { &*pair.2 };
+        // Releasing a kernel mutex restores the owner's base priority. A
+        // scheduling change must update that priority as well as the ready queue.
+        let mutex = blueos::sync::Mutex::create();
+        assert!(mutex.pend_for(blueos::time::Tick::MAX));
         ready.post(());
         loop {
             if release.load(Ordering::Acquire) {
@@ -1079,6 +1084,14 @@ mod tests {
             }
             bk_syscall!(SchedYield);
         }
+        mutex.post();
+        let mut policy = 0;
+        let mut observed = sched_param { sched_priority: 0 };
+        assert_eq!(
+            pthread_getschedparam(pthread_self(), &mut policy, &mut observed),
+            0
+        );
+        observed_after_unlock.post(observed.sched_priority);
         ptr::null_mut()
     }
 
@@ -1138,7 +1151,12 @@ mod tests {
     fn check_pthread_setschedparam_ready_thread() {
         let ready = Waitval::new();
         let release = AtomicBool::new(false);
-        let mut pair: ReadyPair = (&ready as *const _, &release as *const _);
+        let observed_after_unlock = Waitval::new();
+        let mut pair: ReadyPair = (
+            &ready as *const _,
+            &release as *const _,
+            &observed_after_unlock as *const _,
+        );
 
         let mut th: pthread_t = 0;
         let ret = unsafe {
@@ -1155,15 +1173,17 @@ mod tests {
 
         let desired = sched_param { sched_priority: 3 };
         let ret = unsafe { pthread_setschedparam(th, SCHED_RR, &desired) };
+        assert_eq!(ret, 0);
 
         let mut policy = 0;
         let mut observed = sched_param { sched_priority: 0 };
-        pthread_getschedparam(th, &mut policy, &mut observed);
+        assert_eq!(pthread_getschedparam(th, &mut policy, &mut observed), 0);
 
         assert_eq!(policy, SCHED_RR);
         assert_eq!(observed.sched_priority, desired.sched_priority);
 
         release.store(true, Ordering::Release);
+        assert_eq!(*observed_after_unlock.wait(), desired.sched_priority);
 
         unsafe {
             pthread_join(th, ptr::null_mut());
@@ -1201,11 +1221,11 @@ mod tests {
         notify.wait();
 
         let desired = sched_param { sched_priority: 2 };
-        unsafe { pthread_setschedparam(th, SCHED_RR, &desired) };
+        assert_eq!(unsafe { pthread_setschedparam(th, SCHED_RR, &desired) }, 0);
 
         let mut policy = 0;
         let mut observed = sched_param { sched_priority: 0 };
-        pthread_getschedparam(th, &mut policy, &mut observed);
+        assert_eq!(pthread_getschedparam(th, &mut policy, &mut observed), 0);
         assert_eq!(policy, SCHED_RR);
         assert_eq!(observed.sched_priority, desired.sched_priority);
 
