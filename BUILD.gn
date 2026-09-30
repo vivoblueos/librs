@@ -13,8 +13,16 @@
 # limitations under the License.
 
 import("//build/boards/${board}.gni")
+import("//build/templates/blueos_dso.gni")
 import("//build/templates/build_template.gni")
 import("//build/toolchain/blueos.gni")
+
+_thumb_cfgs = []
+if (rust_abi_target == "thumbv7m-none-eabi") {
+  _thumb_cfgs = [ "armv7m" ]
+} else if (rust_abi_target == "thumbv8m.main-none-eabihf") {
+  _thumb_cfgs = [ "armv8m" ]
+}
 
 build_rust("librs") {
   crate_type = "rlib"
@@ -47,10 +55,50 @@ build_rust("librs_swi") {
 
   # librs_swi will be used in apps dynamically loaded.
   configs += [ "//build/boards/${board}:app_config" ]
+  cfgs = _thumb_cfgs
 }
 
 run_clippy("librs_swi_clippy") {
   deps = [ ":librs_swi" ]
+}
+
+if (defined(dynamic_loader) && dynamic_loader) {
+  if (defined(dynamic_atomic)) {
+    # RV32IMC has no hardware atomics. Reuse the kernel's IRQ-protected
+    # helpers, with a PIC machine-mode IRQ adapter for the flat application ABI.
+    static_library("dynamic_atomic") {
+      sources = [
+        "//kernel/kernel/src/sync/libatomic/atomic.c",
+        "start/riscv/atomic_irq.S",
+      ]
+      configs += [ "//build/boards/${board}:dynamic_config" ]
+      cflags = [ "-fPIC" ]
+    }
+  }
+
+  blueos_dso("libc") {
+    crate_name = "librs"
+    soname = "libc.so.1"
+    sources = [ "src/lib.rs" ]
+    cfgs = _thumb_cfgs + [ "librs_dso" ]
+    deps = [
+      "//external/vendor/spin-0.9.8:spin",
+      "//kernel/header:blueos_header",
+      "//kernel/scal:blueos_scal_swi",
+      "//libc",
+    ]
+  }
+
+  static_library("blueos_scrt1") {
+    if (rust_abi_target == "riscv32" || rust_abi_target == "riscv64") {
+      sources = [ "start/riscv/blueos_scrt1.S" ]
+    } else if (rust_abi_target == "aarch64-unknown-none") {
+      sources = [ "start/aarch64/blueos_scrt1.S" ]
+    } else {
+      sources = [ "start/arm/blueos_scrt1.S" ]
+    }
+    configs += [ "//build/boards/${board}:kernel_config" ]
+  }
 }
 
 build_rust("librs_unittest_image") {
@@ -70,6 +118,7 @@ build_rust("librs_unittest_image") {
   linker_script = default_linker_script
   proc_macro_deps = [ "//kernel/test_harness:blueos_test_macro" ]
   rustflags = [ "--test" ]
+  cfgs = _thumb_cfgs
 }
 
 run_clippy("librs_unittest_image_clippy") {
