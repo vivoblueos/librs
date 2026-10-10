@@ -41,6 +41,9 @@ pub mod c_str;
 pub mod ctype;
 pub mod direct;
 pub mod errno;
+// Shared userspace ABI for the ESP32-C3 internal-flash misc device.
+#[cfg(librs_esp32_flash)]
+pub mod esp32_flash;
 pub mod fcntl;
 pub mod io;
 pub mod iter;
