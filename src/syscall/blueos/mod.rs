@@ -21,8 +21,8 @@ use crate::{
 use blueos_header::syscalls::NR::{
     Accept, Bind, Chdir, ClockGetTime, ClockNanoSleep, Close, Connect, FStat, Fcntl, FreeAddrinfo,
     Ftruncate, GetAddrinfo, GetDents, Getcwd, Getsockopt, Ioctl, Link, Listen, Lseek, Mkdir, Open,
-    Read, Recv, Recvfrom, Recvmsg, Rmdir, Send, Sendmsg, Sendto, Setsockopt, Shutdown, Socket,
-    Statfs, Unlink, Write,
+    Read, Recv, Recvfrom, Recvmsg, Rename, Rmdir, Send, Sendmsg, Sendto, Setsockopt, Shutdown,
+    Socket, Statfs, Unlink, Write,
 };
 use blueos_scal::bk_syscall;
 use libc::{
@@ -204,9 +204,8 @@ impl Syscall for Sys {
         // blueos is not valid for this syscall now
         bk_syscall!(Lseek, fildes, offset as usize, whence) as off_t
     }
-    fn rename(_oldpath: CStr, _newpath: CStr) -> Result<()> {
-        // blueos is not valid for this syscall now
-        Ok(())
+    fn rename(oldpath: CStr, newpath: CStr) -> Result<()> {
+        to_result(bk_syscall!(Rename, oldpath.as_ptr(), newpath.as_ptr()) as usize).map(|_| ())
     }
     fn unlink(_path: CStr) -> Result<()> {
         // blueos is not valid for this syscall now
